@@ -1,0 +1,10 @@
+Floating application launcher
+
+The launcher starts a background single instance on desktop login. Close, Escape,
+or opening an application hides its window; the background process stays active.
+Search filters the selected category. Classification uses desktop-entry categories.
+The translucent styling does not itself implement background blur: GNOME Shell and
+a compatible blur extension must provide it separately.
+
+The bundled application icon comes from the WhiteSur icon theme. Its license is
+included as WhiteSur-COPYING.

@@ -1,0 +1,10 @@
+Package: glass-floating-launcher
+Version: 1.0.0
+Section: x11
+Priority: optional
+Architecture: all
+Depends: python3, python3-gi, gir1.2-gtk-3.0
+Recommends: gnome-software
+Maintainer: Local Desktop <local@localhost>
+Description: Floating application launcher for GNOME
+ A compact floating launcher with search, categories and a translucent panel.

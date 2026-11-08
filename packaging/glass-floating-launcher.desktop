@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=应用启动器
+Comment=打开应用启动器
+Exec=/home/chenwei/.local/share/glass-floating-launcher/launcher.py
+Icon=view-app-grid
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=io.github.local.GlassFloatingLauncher

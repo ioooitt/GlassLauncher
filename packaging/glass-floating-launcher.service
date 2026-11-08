@@ -1,0 +1,13 @@
+[Unit]
+Description=Floating application launcher
+After=gnome-session-initialized.target
+PartOf=gnome-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/glass-floating-launcher/launcher.py --background
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=gnome-session.target

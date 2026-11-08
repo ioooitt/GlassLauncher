@@ -1,0 +1,359 @@
+#!/usr/bin/python3
+import gi
+import sys
+import json
+import os
+import subprocess
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gio, Gdk, GLib, Pango
+
+GLib.set_prgname('glass-floating-launcher')
+CATEGORIES = [
+    ('全部', ()), ('常用', ()), ('办公', ('Office',)), ('网络', ('Network', 'WebBrowser', 'Email')),
+    ('开发', ('Development',)), ('图像', ('Graphics',)),
+    ('影音', ('AudioVideo', 'Audio', 'Video')), ('游戏', ('Game',)),
+    ('系统', ('System', 'Settings', 'Utility')), ('其他', ()),
+]
+KNOWN = set(tag for _, tags in CATEGORIES for tag in tags)
+CATEGORY_ICONS = {
+    '全部': 'view-app-grid-symbolic', '常用': 'starred-symbolic', '办公': 'x-office-document-symbolic',
+    '网络': 'network-wired-symbolic', '开发': 'applications-development-symbolic',
+    '图像': 'applications-graphics-symbolic', '影音': 'applications-multimedia-symbolic',
+    '游戏': 'applications-games-symbolic', '系统': 'preferences-system-symbolic',
+    '其他': 'applications-other-symbolic',
+}
+
+class Launcher(Gtk.Window):
+    def __init__(self, application):
+        super().__init__(title='应用启动器', application=application)
+        self.set_decorated(False)
+        self.set_default_size(760, 520)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_icon_name('glass-floating-launcher')
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.connect('delete-event', self.on_delete)
+        self.connect('key-press-event', self.on_key)
+        self.connect('notify::is-active', self.on_active_changed)
+        self.category = '全部'
+        self.state_path = os.path.join(GLib.get_user_data_dir(), 'glass-floating-launcher', 'state.json')
+        self.state = self.load_state()
+        self.menu_open = False
+        self.refresh_source = 0
+        self.app_monitor = Gio.AppInfoMonitor.get()
+        self.app_monitor.connect('changed', self.schedule_refresh)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.get_style_context().add_class('glass-panel')
+        root.set_border_width(0)
+        self.add(root)
+        header = Gtk.Box(spacing=10)
+        root.pack_start(header, False, False, 0)
+        title = Gtk.Label(label='应用')
+        title.get_style_context().add_class('heading')
+        header.pack_start(title, False, False, 0)
+        self.search = Gtk.SearchEntry()
+        self.search.set_placeholder_text('搜索应用')
+        self.search.set_can_focus(True)
+        self.set_focus(self.search)
+        self.search.set_hexpand(False)
+        self.search.set_width_chars(36)
+        self.search.set_max_width_chars(40)
+        self.search.set_halign(Gtk.Align.CENTER)
+        self.search.connect('search-changed', lambda *_: self.flow.invalidate_filter())
+        self.search.connect('activate', self.activate_first)
+        search_slot = Gtk.Box()
+        search_slot.set_hexpand(True)
+        search_slot.pack_start(self.search, True, False, 0)
+        header.pack_start(search_slot, True, True, 0)
+        close = Gtk.Button.new_from_icon_name('window-close-symbolic', Gtk.IconSize.BUTTON)
+        close.get_style_context().add_class('close-button')
+        close.set_tooltip_text('关闭')
+        close.connect('clicked', lambda *_: self.iconify())
+        header.pack_end(close, False, False, 0)
+        tab_scroll = Gtk.ScrolledWindow()
+        tab_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        tab_scroll.set_propagate_natural_height(True)
+        root.pack_start(tab_scroll, False, False, 0)
+        categories = Gtk.Box(spacing=4)
+        categories.get_style_context().add_class('categories')
+        tab_scroll.add(categories)
+        group = None
+        for name, _ in CATEGORIES:
+            button = Gtk.RadioButton.new_from_widget(group)
+            tab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            image = Gtk.Image.new_from_icon_name(CATEGORY_ICONS[name], Gtk.IconSize.MENU)
+            tab.pack_start(image, False, False, 0)
+            tab.pack_start(Gtk.Label(label=name), False, False, 0)
+            button.add(tab)
+            if group is None:
+                group = button
+            button.set_mode(False)
+            button.connect('toggled', self.on_category, name)
+            categories.pack_start(button, False, False, 0)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.pack_start(scroller, True, True, 0)
+        self.flow = Gtk.FlowBox()
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flow.set_min_children_per_line(5)
+        self.flow.set_max_children_per_line(5)
+        self.flow.set_row_spacing(8)
+        self.flow.set_column_spacing(8)
+        self.flow.set_homogeneous(True)
+        self.flow.set_valign(Gtk.Align.START)
+        self.flow.set_vexpand(False)
+        self.flow.set_filter_func(self.filter_item)
+        self.flow.set_sort_func(self.sort_items)
+        scroller.add(self.flow)
+        self.refresh_apps()
+        provider = Gtk.CssProvider()
+        provider.load_from_data(b'''window { background: transparent; } .glass-panel { background-color: rgba(24, 35, 48, 0.72); border: 1px solid rgba(225, 240, 255, 0.22); border-radius: 20px; padding: 10px 12px; color: #f7fbff; } popover.glass-menu { background-color: rgba(29, 48, 68, 0.90); border: 1px solid rgba(225, 240, 255, 0.25); border-radius: 14px; color: #f7fbff; } .glass-menu-item { background: transparent; border: none; box-shadow: none; border-radius: 9px; color: #f7fbff; padding: 7px 10px; } .glass-menu-item:hover, .glass-menu-item:focus { background: rgba(220, 240, 255, 0.17); } .new-badge { background: #3989ed; color: white; border-radius: 9px; font-size: 10px; padding: 1px 4px; } .heading { font-size: 15px; font-weight: bold; color: #f7fbff; } .category-label { color: rgba(230, 238, 248, 0.70); font-size: 12px; } .app-button, .close-button { background: transparent; border: none; box-shadow: none; border-radius: 12px; color: #f7fbff; } .app-button { padding: 8px 4px; font-size: 12px; font-weight: normal; } .app-button:hover, .app-button:focus, .close-button:hover { background: rgba(220, 240, 255, 0.14); } entry { background: rgba(225, 242, 255, 0.12); color: #ffffff; caret-color: #ffffff; border: 1px solid rgba(230, 245, 255, 0.14); border-radius: 12px; padding: 2px 10px; min-height: 26px; font-size: 13px; } entry:focus { border-color: rgba(151, 204, 255, 0.85); box-shadow: 0 0 0 1px rgba(151, 204, 255, 0.35); } .categories button { background: transparent; color: rgba(245, 250, 255, 0.72); border: none; border-radius: 10px; box-shadow: none; padding: 4px 8px; font-size: 12px; font-weight: normal; } .categories button:hover { background: rgba(220, 240, 255, 0.12); } .categories button:checked { background: rgba(220, 240, 255, 0.20); color: #ffffff; }''')
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def load_state(self):
+        try:
+            with open(self.state_path, encoding='utf-8') as stream:
+                state = json.load(stream)
+            return state if isinstance(state, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_state(self):
+        try:
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+            temporary = self.state_path + '.tmp'
+            with open(temporary, 'w', encoding='utf-8') as stream:
+                json.dump(self.state, stream, ensure_ascii=False)
+            os.replace(temporary, self.state_path)
+        except OSError as error:
+            print('无法保存启动器状态:', error, file=sys.stderr)
+
+    def schedule_refresh(self, *_args):
+        if self.refresh_source:
+            GLib.source_remove(self.refresh_source)
+        self.refresh_source = GLib.timeout_add(500, self.refresh_apps)
+
+    def refresh_apps(self):
+        self.refresh_source = 0
+        for child in self.flow.get_children():
+            self.flow.remove(child)
+        apps = sorted((a for a in Gio.AppInfo.get_all() if a.should_show() and a.get_id()), key=lambda a: a.get_display_name().casefold())
+        seen = set()
+        installed_ids = {app.get_id() for app in apps if app.get_id() != 'glass-floating-launcher.desktop'}
+        previous = self.state.get('known')
+        if previous is not None:
+            self.state['new'] = sorted((set(self.state.get('new', [])) | (installed_ids - set(previous))) & installed_ids)
+        self.state['known'] = sorted(installed_ids)
+        self.save_state()
+        for app in apps:
+            if app.get_id() in seen or app.get_id() == 'glass-floating-launcher.desktop':
+                continue
+            seen.add(app.get_id())
+            button = Gtk.Button()
+            button.get_style_context().add_class('app-button')
+            button.set_tooltip_text(app.get_description() or app.get_display_name())
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            icon = Gtk.Image.new_from_gicon(app.get_icon() or Gio.ThemedIcon.new('application-x-executable'), Gtk.IconSize.DIALOG)
+            icon.set_pixel_size(42)
+            label = Gtk.Label(label=app.get_display_name())
+            label.set_max_width_chars(12)
+            label.set_ellipsize(Pango.EllipsizeMode.END)
+            icon_overlay = Gtk.Overlay()
+            icon_overlay.set_halign(Gtk.Align.CENTER)
+            icon_overlay.add(icon)
+            if app.get_id() in self.state.get('new', []):
+                badge = Gtk.Label(label='新')
+                badge.get_style_context().add_class('new-badge')
+                badge.set_halign(Gtk.Align.END)
+                badge.set_valign(Gtk.Align.START)
+                icon_overlay.add_overlay(badge)
+            content.pack_start(icon_overlay, False, False, 0)
+            content.pack_start(label, False, False, 0)
+            button.add(content)
+            button.connect('clicked', self.launch, app)
+            button.connect('button-press-event', self.on_app_button, app)
+            child = Gtk.FlowBoxChild()
+            child.app = app
+            child.tags = set((app.get_categories() or '').split(';')) if hasattr(app, 'get_categories') else set()
+            child.add(button)
+            self.flow.add(child)
+        self.flow.show_all()
+        self.flow.invalidate_filter()
+        return GLib.SOURCE_REMOVE
+
+    def on_app_button(self, button, event, app):
+        if event.button != 3:
+            return False
+        settings = Gio.Settings.new('org.gnome.shell')
+        favorites = settings.get_strv('favorite-apps')
+        pinned = app.get_id() in favorites
+        popover = Gtk.Popover.new(button)
+        popover.get_style_context().add_class('glass-menu')
+        popover.set_position(Gtk.PositionType.BOTTOM)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        content.set_border_width(6)
+        popover.add(content)
+
+        def toggle_pin(*_args):
+            current = settings.get_strv('favorite-apps')
+            if app.get_id() in current:
+                current.remove(app.get_id())
+            else:
+                current.append(app.get_id())
+            settings.set_strv('favorite-apps', current)
+
+        def add_item(label, icon_name, callback):
+            item = Gtk.Button()
+            item.get_style_context().add_class('glass-menu-item')
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+            row.pack_start(icon, False, False, 0)
+            text = Gtk.Label(label=label, xalign=0)
+            row.pack_start(text, True, True, 0)
+            item.add(row)
+            def activate(*_args):
+                popover.popdown()
+                callback()
+            item.connect('clicked', activate)
+            content.pack_start(item, False, False, 0)
+
+        add_item('从 Dock 取消固定' if pinned else '固定到 Dock',
+                 'list-remove-symbolic' if pinned else 'list-add-symbolic', toggle_pin)
+        add_item('应用信息', 'dialog-information-symbolic', lambda: self.show_app_info(app))
+        add_item('在软件中心卸载…', 'user-trash-symbolic', lambda: self.open_software(app))
+        self.menu_open = True
+        popover.connect('closed', self.on_menu_close)
+        popover.show_all()
+        popover.popup()
+        return True
+
+    def on_menu_close(self, *_args):
+        self.menu_open = False
+
+    def show_app_info(self, app):
+        details = [app.get_display_name(), app.get_description() or '',
+                   '应用 ID：' + (app.get_id() or ''),
+                   '启动命令：' + (app.get_commandline() or '')]
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+            message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.CLOSE,
+            text='应用信息')
+        dialog.format_secondary_text('\n'.join(line for line in details if line))
+        dialog.run()
+        dialog.destroy()
+
+    def open_software(self, app):
+        try:
+            subprocess.Popen(['gnome-software', '--details=' + app.get_id()])
+            self.iconify()
+        except OSError as error:
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
+                text='无法打开软件中心')
+            dialog.format_secondary_text(str(error))
+            dialog.run()
+            dialog.destroy()
+
+    def on_category(self, button, name):
+        if button.get_active():
+            self.category = name
+            if hasattr(self, 'flow'):
+                self.flow.invalidate_filter()
+                self.flow.invalidate_sort()
+
+    def sort_items(self, first, second, *_args):
+        if self.category == '常用':
+            usage = self.state.get('usage', {})
+            difference = usage.get(second.app.get_id(), 0) - usage.get(first.app.get_id(), 0)
+            if difference:
+                return difference
+        left = first.app.get_display_name().casefold()
+        right = second.app.get_display_name().casefold()
+        return (left > right) - (left < right)
+
+    def filter_item(self, child):
+        query = self.search.get_text().strip().casefold()
+        text = (child.app.get_display_name() + ' ' + (child.app.get_description() or '') + ' ' + child.app.get_id()).casefold()
+        tags = dict(CATEGORIES).get(self.category, ())
+        matches_category = self.category == '全部' or (self.category == '常用' and self.state.get('usage', {}).get(child.app.get_id(), 0) > 0) or (self.category == '其他' and not child.tags.intersection(KNOWN)) or bool(child.tags.intersection(tags))
+        return matches_category and (not query or query in text)
+
+    def launch(self, _button, app):
+        try:
+            app.launch([], Gdk.Display.get_default().get_app_launch_context())
+            usage = self.state.setdefault('usage', {})
+            usage[app.get_id()] = usage.get(app.get_id(), 0) + 1
+            self.state['new'] = [item for item in self.state.get('new', []) if item != app.get_id()]
+            self.save_state()
+            self.schedule_refresh()
+            self.iconify()
+        except GLib.Error as error:
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE, text='无法启动应用')
+            dialog.format_secondary_text(error.message)
+            dialog.run()
+            dialog.destroy()
+
+    def activate_first(self, _entry):
+        for child in self.flow.get_children():
+            if child.get_child_visible():
+                self.launch(None, child.app)
+                break
+
+    def on_key(self, _window, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.iconify()
+            return True
+        return False
+
+    def on_active_changed(self, window, _param):
+        if window.get_visible() and window.is_active():
+            GLib.idle_add(self.focus_search)
+        elif window.get_visible():
+            # Let Dock finish handling its click while the window still exists.
+            GLib.timeout_add(350, self.hide_if_inactive)
+
+    def focus_search(self):
+        if self.get_visible() and self.is_active() and not self.menu_open:
+            self.search.grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    def hide_if_inactive(self):
+        has_dialog = any(w.get_visible() and w.get_transient_for() is self
+                         for w in Gtk.Window.list_toplevels()
+                         if isinstance(w, Gtk.Window))
+        if self.get_visible() and not self.is_active() and not has_dialog and not self.menu_open:
+            self.iconify()
+        return GLib.SOURCE_REMOVE
+
+    def on_delete(self, *_args):
+        self.iconify()
+        return True
+
+class LauncherApplication(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id='io.github.local.GlassFloatingLauncher', flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.window = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        self.hold()
+        # Build the application grid in advance, without mapping the window.
+        self.window = Launcher(self)
+        self.window.realize()
+
+    def do_command_line(self, command_line):
+        if '--background' not in command_line.get_arguments()[1:]:
+            self.activate()
+        return 0
+
+    def do_activate(self):
+        if self.window is None:
+            self.window = Launcher(self)
+        self.window.show_all()
+        self.window.deiconify()
+        self.window.present()
+        self.window.search.grab_focus()
+
+application = LauncherApplication()
+sys.exit(application.run(sys.argv))

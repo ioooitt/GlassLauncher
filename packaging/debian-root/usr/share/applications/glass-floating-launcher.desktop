@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=应用启动器
+Name[en]=Application Launcher
+Comment=搜索并启动应用
+Exec=/usr/bin/glass-floating-launcher
+Icon=glass-floating-launcher
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=io.github.local.GlassFloatingLauncher

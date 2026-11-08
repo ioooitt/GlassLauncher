@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=应用启动器后台服务
+Exec=/usr/bin/glass-floating-launcher --background
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
