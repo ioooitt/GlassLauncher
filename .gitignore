@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 .venv/
+
+# 构建产物（由 packaging/build-deb.sh 生成）
+packaging/debian-root/usr/bin/glass-floating-launcher
+packaging/*.deb
